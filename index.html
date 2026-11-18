@@ -1,0 +1,1172 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AR-Werkstatt</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  /* Layout: Kamerabild oben, Bedienleiste, Messwerte als Raster darunter. Einheitlich dunkel wie ein Sucher. */
+  --bg: #0e1113;
+  --panel: #171c1f;
+  --line: #2a3136;
+  --text: #e6ebee;
+  --muted: #8b979f;
+  --accent: #ffb547;
+  --ok: #4cd47a;
+  --warn: #ffb547;
+  --err: #ff6b5e;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-body); font-size: 15px; line-height: 1.45; }
+main { max-width: 900px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+header { display: grid; gap: 2px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0; text-wrap: balance; }
+.sub { color: var(--muted); margin: 0; font-size: 14px; }
+.stage { position: relative; background: #000; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+canvas#view { display: block; width: 100%; height: auto; }
+.badge { position: absolute; left: 10px; top: 10px; font: 500 12px var(--font-mono); padding: 4px 8px; border-radius: 999px; background: rgba(14,17,19,.82); border: 1px solid var(--line); display: flex; gap: 6px; align-items: center; }
+.badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.badge[data-s="ok"]::before { background: var(--ok); }
+.badge[data-s="warn"]::before { background: var(--warn); }
+.badge[data-s="err"]::before { background: var(--err); }
+.controls { display: grid; gap: 10px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button, .btn { font: 500 14px var(--font-body); color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 9px 14px; cursor: pointer; }
+button:hover, .btn:hover { border-color: var(--muted); }
+button:focus-visible, .btn:focus-within, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.primary { background: var(--accent); color: #1a1205; border-color: var(--accent); }
+.btn { position: relative; }
+.sr { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
+.seg { display: flex; flex-wrap: wrap; gap: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; width: fit-content; }
+.seg button { border: 0; border-radius: 0; border-right: 1px solid var(--line); background: transparent; padding: 8px 12px; }
+.seg button:last-child { border-right: 0; }
+.num { width: 70px; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; font-size: 14px; }
+[hidden] { display: none !important; }
+canvas#view { touch-action: manipulation; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: #1a1205; }
+.opt { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 14px; }
+input[type=range] { accent-color: var(--accent); width: 140px; }
+input[type=checkbox] { accent-color: var(--accent); }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.readout { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.cell { background: var(--panel); padding: 10px 12px; display: grid; gap: 2px; }
+.cell span { color: var(--muted); font-size: 12px; }
+.cell b { font: 500 15px var(--font-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.howto { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; color: var(--muted); font-size: 14px; }
+.howto h2 { color: var(--text); font-size: 15px; margin: 0 0 6px; }
+.howto ol { margin: 0; padding-left: 20px; display: grid; gap: 4px; max-width: 65ch; }
+.howto p { margin: 8px 0 0; max-width: 65ch; }
+#msg { color: var(--warn); font-size: 14px; min-height: 1em; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>AR-Werkstatt</h1>
+    <p class="sub">Erkennt A4-Blatt oder Schachbrett als Bezugsebene. Darauf: 3D-Objekte, Messen in mm, Geräte nach Größe.</p>
+  </header>
+
+  <div class="stage">
+    <canvas id="view" width="1200" height="900"></canvas>
+    <div id="badge" class="badge" data-s="">Lädt …</div>
+  </div>
+
+  <div class="controls">
+    <div class="row">
+      <button id="btnLive" class="primary" type="button">Live-Kamera</button>
+      <label class="btn" for="photo">Foto aufnehmen<input id="photo" class="sr" type="file" accept="image/*" capture="environment"></label>
+      <button id="btnDemo" type="button">Beispielbild</button>
+    </div>
+    <div class="row">
+      <div class="seg" role="group" aria-label="Ziel" id="segTarget">
+        <button type="button" data-target="a4" aria-pressed="true">A4-Blatt</button>
+        <button type="button" data-target="chess">Schachbrett</button>
+      </div>
+      <label class="opt" for="sq" id="sqWrap" hidden>Feldgröße <input id="sq" class="num mono" type="number" min="10" max="120" step="0.5" value="50"> mm</label>
+    </div>
+    <div class="seg" role="group" aria-label="Werkzeug" id="segTool">
+      <button type="button" data-tool="overlay" aria-pressed="true">3D-Overlay</button>
+      <button type="button" data-tool="messen">Messen</button>
+      <button type="button" data-tool="ki">Objekte (KI)</button>
+    </div>
+    <div class="row" id="measRow" hidden>
+      <span class="opt">Tippe 2 Punkte (Strecke) oder 4 Ecken eines flach liegenden Geräts.</span>
+      <button id="btnMeasReset" type="button">Messung löschen</button>
+    </div>
+    <div class="seg" role="group" aria-label="Overlay" id="segMode">
+      <button type="button" data-mode="achsen">Achsen</button>
+      <button type="button" data-mode="pyramide">Pyramide</button>
+      <button type="button" data-mode="prisma">Prisma</button>
+      <button type="button" data-mode="wuerfel">Würfel</button>
+      <button type="button" data-mode="raum" aria-pressed="true">Raum</button>
+    </div>
+    <div class="row">
+      <label class="opt" for="fov">Sichtfeld <span id="fovVal" class="mono">65°</span></label>
+      <input id="fov" type="range" min="35" max="100" step="1" value="65">
+      <button id="btnFovAuto" type="button">Schätzung übernehmen</button>
+      <label class="opt" for="grid"><input id="grid" type="checkbox"> Raster</label>
+      <label class="opt" for="debug"><input id="debug" type="checkbox"> Debug</label>
+    </div>
+    <div id="msg" role="status"></div>
+  </div>
+
+  <section class="readout" aria-label="Messwerte">
+    <div class="cell"><span>Status</span><b id="rStatus">–</b></div>
+    <div class="cell"><span>A–B</span><b id="rAB">–</b></div>
+    <div class="cell"><span>B–C</span><b id="rBC">–</b></div>
+    <div class="cell"><span>C–A</span><b id="rCA">–</b></div>
+    <div class="cell"><span>Winkel A / B / C</span><b id="rAng">–</b></div>
+    <div class="cell"><span>Dreiecksfläche</span><b id="rArea">–</b></div>
+    <div class="cell"><span>Kamera–Blatt</span><b id="rDist">–</b></div>
+    <div class="cell"><span>Neigung Blatt</span><b id="rTilt">–</b></div>
+    <div class="cell"><span>Sichtfeld geschätzt</span><b id="rFov">–</b></div>
+    <div class="cell"><span>Reprojektion</span><b id="rRep">–</b></div>
+    <div class="cell"><span>C im Raummodell</span><b id="rRoom">–</b></div>
+    <div class="cell"><span>Messung</span><b id="rMeas">–</b></div>
+    <div class="cell"><span>Gerät nach Größe</span><b id="rDev">–</b></div>
+    <div class="cell"><span>KI-Objekte</span><b id="rKi">aus</b></div>
+    <div class="cell"><span>Rechenzeit</span><b id="rMs">–</b></div>
+  </section>
+
+  <section class="howto">
+    <h2>So geht es</h2>
+    <ol>
+      <li>Ziel wählen. A4: Blatt auf dunklen, matten Untergrund, alle vier Ecken sichtbar. Schachbrett: leeres Brett, Feldgröße mit Lineal messen und eintragen. Ein Teilausschnitt reicht.</li>
+      <li>Optional: drei gefüllte Punkte malen, Ø 8–20 mm, dicker schwarzer Stift. Nicht als gleichseitiges Dreieck.</li>
+      <li>Foto aufnehmen oder Live-Kamera starten. Sichtfeld an Kamera anpassen (iPhone-Hauptkamera ca. 63–66°).</li>
+      <li>Labels: A liegt gegenüber der längsten Seite, C gegenüber der kürzesten.</li>
+    </ol>
+    <p>Messen: Taps landen auf der erkannten Ebene und bleiben dort liegen, auch wenn die Kamera sich bewegt. 4 Ecken eines flach liegenden Geräts ergeben Breite × Höhe. Der Abgleich mit einer Maßtabelle (iPhone, iPad, MacBook, Karte) läuft nur über die Größe, ohne Bilderkennung.</p>
+    <p>Objekte (KI): COCO-SSD erkennt u. a. Handy, Laptop, Monitor, Tastatur, Maus, Tasse. Liegt das Objekt flach auf der Ebene, schätzt die Seite die Größe und gleicht mit der Maßtabelle ab. Das Modell lädt von Google-Servern. Im Viewer ist das blockiert, selbst gehostet geht es.</p>
+    <p>Raum-Modus: A ist eine Raumecke, A→B die Wand. Ein 4 m × 4,5 m L-Grundriss wird darauf skaliert. So funktioniert der Abgleich Modell zu Raum, nur verkleinert. Ohne Punkte hängt das Objekt an der Blattmitte.</p>
+    <p>Hier im Viewer blockiert der Sandbox-Rahmen die Live-Kamera. Foto aufnehmen funktioniert. Für Live-Tracking die Datei per HTTPS selbst hosten.</p>
+  </section>
+</main>
+
+<video id="video" playsinline muted style="display:none"></video>
+<canvas id="proc" style="display:none"></canvas>
+
+<script>
+const Core = (() => {
+  const A4L = 297, A4S = 210;
+
+  function toGray(rgba, n) {
+    const g = new Uint8Array(n);
+    for (let i = 0, j = 0; i < n; i++, j += 4) g[i] = (rgba[j] * 77 + rgba[j + 1] * 150 + rgba[j + 2] * 29) >> 8;
+    return g;
+  }
+
+  function otsu(g) {
+    const hist = new Float64Array(256);
+    for (let i = 0; i < g.length; i++) hist[g[i]]++;
+    const total = g.length;
+    let sum = 0;
+    for (let i = 0; i < 256; i++) sum += i * hist[i];
+    let sumB = 0, wB = 0, best = -1, th = 127;
+    for (let t = 0; t < 256; t++) {
+      wB += hist[t];
+      if (!wB) continue;
+      const wF = total - wB;
+      if (!wF) break;
+      sumB += t * hist[t];
+      const mB = sumB / wB, mF = (sum - sumB) / wF;
+      const v = wB * wF * (mB - mF) * (mB - mF);
+      if (v > best) { best = v; th = t; }
+    }
+    return th;
+  }
+
+  function components(mask, w, h, minArea) {
+    const n = w * h;
+    const labels = new Int32Array(n);
+    const stack = new Int32Array(n);
+    const comps = [];
+    let id = 0;
+    for (let s = 0; s < n; s++) {
+      if (!mask[s] || labels[s]) continue;
+      id++;
+      let sp = 0;
+      stack[sp++] = s;
+      labels[s] = id;
+      let area = 0, sx = 0, sy = 0, minx = w, maxx = 0, miny = h, maxy = 0;
+      while (sp) {
+        const p = stack[--sp];
+        const x = p % w, y = (p / w) | 0;
+        area++; sx += x; sy += y;
+        if (x < minx) minx = x;
+        if (x > maxx) maxx = x;
+        if (y < miny) miny = y;
+        if (y > maxy) maxy = y;
+        let q;
+        if (x > 0) { q = p - 1; if (mask[q] && !labels[q]) { labels[q] = id; stack[sp++] = q; } }
+        if (x < w - 1) { q = p + 1; if (mask[q] && !labels[q]) { labels[q] = id; stack[sp++] = q; } }
+        if (y > 0) { q = p - w; if (mask[q] && !labels[q]) { labels[q] = id; stack[sp++] = q; } }
+        if (y < h - 1) { q = p + w; if (mask[q] && !labels[q]) { labels[q] = id; stack[sp++] = q; } }
+      }
+      if (area >= minArea) comps.push({ id, area, cx: sx / area, cy: sy / area, minx, maxx, miny, maxy });
+    }
+    return { labels, comps };
+  }
+
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+
+  function hull(pts) {
+    pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const lower = [], upper = [];
+    for (const p of pts) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+      lower.push(p);
+    }
+    for (let i = pts.length - 1; i >= 0; i--) {
+      const p = pts[i];
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+      upper.push(p);
+    }
+    upper.pop(); lower.pop();
+    return lower.concat(upper);
+  }
+
+  function quadFromHull(H) {
+    if (H.length < 4) return null;
+    let bi = 0, bj = 0, bd = -1;
+    for (let i = 0; i < H.length; i++) for (let j = i + 1; j < H.length; j++) {
+      const dx = H[i][0] - H[j][0], dy = H[i][1] - H[j][1], d = dx * dx + dy * dy;
+      if (d > bd) { bd = d; bi = i; bj = j; }
+    }
+    const a = H[bi], b = H[bj];
+    let pmax = 0, pmin = 0, c = null, d = null;
+    for (const p of H) {
+      const s = cross(a, b, p);
+      if (s > pmax) { pmax = s; c = p; }
+      if (s < pmin) { pmin = s; d = p; }
+    }
+    if (!c || !d) return null;
+    return [a, c, b, d].map(p => [p[0], p[1]]);
+  }
+
+  function polyArea(q) {
+    let s = 0;
+    for (let i = 0; i < q.length; i++) { const a = q[i], b = q[(i + 1) % q.length]; s += a[0] * b[1] - b[0] * a[1]; }
+    return s / 2;
+  }
+
+  function solve(A, b) {
+    const n = b.length;
+    const M = A.map((r, i) => r.concat([b[i]]));
+    for (let c = 0; c < n; c++) {
+      let piv = c;
+      for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r;
+      if (Math.abs(M[piv][c]) < 1e-12) return null;
+      [M[c], M[piv]] = [M[piv], M[c]];
+      for (let r = c + 1; r < n; r++) {
+        const f = M[r][c] / M[c][c];
+        for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k];
+      }
+    }
+    const x = new Array(n);
+    for (let r = n - 1; r >= 0; r--) {
+      let s = M[r][n];
+      for (let k = r + 1; k < n; k++) s -= M[r][k] * x[k];
+      x[r] = s / M[r][r];
+    }
+    return x;
+  }
+
+  function homography(src, dst) {
+    const A = [], b = [];
+    for (let k = 0; k < 4; k++) {
+      const [x, y] = src[k], [u, v] = dst[k];
+      A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+      A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+    }
+    const h = solve(A, b);
+    return h ? h.concat([1]) : null;
+  }
+
+  function applyH(H, x, y) {
+    const w = H[6] * x + H[7] * y + H[8];
+    return [(H[0] * x + H[1] * y + H[2]) / w, (H[3] * x + H[4] * y + H[5]) / w];
+  }
+
+  function inv3(m) {
+    const [a, b, c, d, e, f, g, h, i] = m;
+    const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
+    const det = a * A + b * B + c * C;
+    if (Math.abs(det) < 1e-15) return null;
+    return [A / det, -(b * i - c * h) / det, (b * f - c * e) / det,
+      B / det, (a * i - c * g) / det, -(a * f - c * d) / det,
+      C / det, -(a * h - b * g) / det, (a * e - b * d) / det];
+  }
+
+  // Detect A4 sheet (bright quad) and dark hand-drawn dots on it.
+  function detect(rgba, w, h) {
+    const n = w * h, g = toGray(rgba, n);
+    const t = otsu(g);
+    const bright = new Uint8Array(n);
+    for (let i = 0; i < n; i++) bright[i] = g[i] > t ? 1 : 0;
+    const { labels, comps } = components(bright, w, h, n * 0.02);
+    if (!comps.length) return { ok: false, reason: 'Kein helles Blatt gefunden. Dunklen Untergrund nutzen.' };
+    comps.sort((a, b) => b.area - a.area);
+    const pc = comps[0];
+    const pts = [];
+    let sumG = 0;
+    for (let y = pc.miny; y <= pc.maxy; y++) {
+      let mn = -1, mx = -1;
+      const row = y * w;
+      for (let x = pc.minx; x <= pc.maxx; x++) {
+        if (labels[row + x] === pc.id) { if (mn < 0) mn = x; mx = x; sumG += g[row + x]; }
+      }
+      if (mn >= 0) pts.push([mn, y], [mn, y + 1], [mx + 1, y], [mx + 1, y + 1]);
+    }
+    const paperMean = sumG / pc.area;
+    const quad = quadFromHull(hull(pts));
+    if (!quad) return { ok: false, reason: 'Blattform nicht erkannt.' };
+    const qa = Math.abs(polyArea(quad));
+    const fillRatio = pc.area / qa;
+    if (fillRatio < 0.75) return { ok: false, quad, reason: 'Blatt verdeckt, angeschnitten oder Untergrund zu hell.' };
+
+    // integral image for local mean
+    const W1 = w + 1;
+    const ii = new Float64Array(W1 * (h + 1));
+    for (let y = 0; y < h; y++) {
+      let rs = 0;
+      for (let x = 0; x < w; x++) { rs += g[y * w + x]; ii[(y + 1) * W1 + x + 1] = ii[y * W1 + x + 1] + rs; }
+    }
+    const r = Math.max(4, Math.round(Math.max(w, h) / 20));
+    const qc = [(quad[0][0] + quad[1][0] + quad[2][0] + quad[3][0]) / 4, (quad[0][1] + quad[1][1] + quad[2][1] + quad[3][1]) / 4];
+    const sq = quad.map(p => [qc[0] + (p[0] - qc[0]) * 0.95, qc[1] + (p[1] - qc[1]) * 0.95]);
+    const sgn = Math.sign(polyArea(sq));
+    let bx0 = w, bx1 = 0, by0 = h, by1 = 0;
+    for (const p of sq) { bx0 = Math.min(bx0, p[0]); bx1 = Math.max(bx1, p[0]); by0 = Math.min(by0, p[1]); by1 = Math.max(by1, p[1]); }
+    bx0 = Math.max(0, Math.floor(bx0)); by0 = Math.max(0, Math.floor(by0));
+    bx1 = Math.min(w - 1, Math.ceil(bx1)); by1 = Math.min(h - 1, Math.ceil(by1));
+    const dark = new Uint8Array(n);
+    const gTh = 0.7 * paperMean;
+    for (let y = by0; y <= by1; y++) {
+      const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
+      for (let x = bx0; x <= bx1; x++) {
+        const gv = g[y * w + x];
+        if (gv >= gTh) continue;
+        const px = x + 0.5, py = y + 0.5;
+        let inside = true;
+        for (let k = 0; k < 4; k++) {
+          const a = sq[k], b = sq[(k + 1) % 4];
+          if (sgn * ((b[0] - a[0]) * (py - a[1]) - (b[1] - a[1]) * (px - a[0])) < 0) { inside = false; break; }
+        }
+        if (!inside) continue;
+        const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1);
+        const s = ii[y1 * W1 + x1] - ii[y0 * W1 + x1] - ii[y1 * W1 + x0] + ii[y0 * W1 + x0];
+        const lm = s / ((x1 - x0) * (y1 - y0));
+        if (gv < 0.85 * lm) dark[y * w + x] = 1;
+      }
+    }
+    const dc = components(dark, w, h, 3).comps;
+    const mm2PerPx = (A4L * A4S) / qa;
+    const cands = dc.map(c => {
+      const bw = c.maxx - c.minx + 1, bh = c.maxy - c.miny + 1;
+      const dEq = 2 * Math.sqrt(c.area * mm2PerPx / Math.PI);
+      const fill = c.area / (bw * bh);
+      const asp = Math.max(bw, bh) / Math.min(bw, bh);
+      return Object.assign(c, { dEq, fill, asp, ok: dEq >= 3 && dEq <= 40 && fill >= 0.45 && asp <= 2.6 });
+    });
+    const good = cands.filter(c => c.ok).sort((a, b) => b.area - a.area);
+    const dots = good.slice(0, 3).map(c => [c.cx + 0.5, c.cy + 0.5]);
+    return {
+      ok: good.length >= 3, quad, dots, cands, paperMean, threshold: t, nGood: good.length,
+      reason: good.length >= 3 ? '' : `Blatt erkannt, ${good.length}/3 Punkte.`
+    };
+  }
+
+
+  // ---------- chessboard: ChESS X-corner detector + lattice fit ----------
+  const RING = (() => {
+    const r = 5, out = [];
+    for (let k = 0; k < 16; k++) { const a = k * Math.PI / 8; out.push([Math.round(r * Math.cos(a)), Math.round(r * Math.sin(a))]); }
+    return out;
+  })();
+
+  function chessCorners(g, w, h) {
+    const n = w * h, b = new Float32Array(n);
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      b[i] = (g[i - w - 1] + g[i - w] + g[i - w + 1] + g[i - 1] + g[i] + g[i + 1] + g[i + w - 1] + g[i + w] + g[i + w + 1]) / 9;
+    }
+    const R = new Float32Array(n), off = RING.map(([dx, dy]) => dy * w + dx), I = new Float32Array(16);
+    let maxR = 0;
+    for (let y = 7; y < h - 7; y++) for (let x = 7; x < w - 7; x++) {
+      const i = y * w + x;
+      let ring = 0;
+      for (let k = 0; k < 16; k++) { I[k] = b[i + off[k]]; ring += I[k]; }
+      let sr = 0, dr = 0;
+      for (let k = 0; k < 4; k++) sr += Math.abs(I[k] + I[k + 8] - I[k + 4] - I[k + 12]);
+      for (let k = 0; k < 8; k++) dr += Math.abs(I[k] - I[k + 8]);
+      const loc = (b[i] + b[i - 1] + b[i + 1] + b[i - w] + b[i + w]) / 5;
+      const r = sr - dr - 16 * Math.abs(ring / 16 - loc);
+      if (r > 0) { R[i] = r; if (r > maxR) maxR = r; }
+    }
+    const th = Math.max(120, maxR * 0.15), pts = [];
+    for (let y = 8; y < h - 8; y++) for (let x = 8; x < w - 8; x++) {
+      const i = y * w + x, r = R[i];
+      if (r < th) continue;
+      let isMax = true;
+      for (let dy = -3; dy <= 3 && isMax; dy++) for (let dx = -3; dx <= 3; dx++) {
+        if (!dx && !dy) continue;
+        const q = R[i + dy * w + dx];
+        if (q > r || (q === r && (dy < 0 || (dy === 0 && dx < 0)))) { isMax = false; break; }
+      }
+      if (!isMax) continue;
+      let sw = 0, sx = 0, sy = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const q = R[i + dy * w + dx]; sw += q; sx += q * dx; sy += q * dy; }
+      pts.push({ x: x + 0.5 + sx / sw, y: y + 0.5 + sy / sw, r });
+    }
+    pts.sort((a, b2) => b2.r - a.r);
+    return pts.slice(0, 250);
+  }
+
+  // least-squares homography, src lattice -> dst image, with image normalisation
+  function fitH(src, dst) {
+    let cu = 0, cv = 0;
+    dst.forEach(p => { cu += p[0]; cv += p[1]; });
+    cu /= dst.length; cv /= dst.length;
+    let sc = 0;
+    dst.forEach(p => { sc += Math.hypot(p[0] - cu, p[1] - cv); });
+    sc = (sc / dst.length) || 1;
+    const N = Array.from({ length: 8 }, () => new Array(8).fill(0)), rhs = new Array(8).fill(0);
+    const addRow = (row, val) => { for (let i = 0; i < 8; i++) { rhs[i] += row[i] * val; for (let j = 0; j < 8; j++) N[i][j] += row[i] * row[j]; } };
+    for (let k = 0; k < src.length; k++) {
+      const [x, y] = src[k], u = (dst[k][0] - cu) / sc, vv = (dst[k][1] - cv) / sc;
+      addRow([x, y, 1, 0, 0, 0, -u * x, -u * y], u);
+      addRow([0, 0, 0, x, y, 1, -vv * x, -vv * y], vv);
+    }
+    const hh = solve(N, rhs);
+    if (!hh) return null;
+    // H = T^-1 * Hn, T^-1 = [[sc,0,cu],[0,sc,cv],[0,0,1]]
+    const Hn = hh.concat([1]);
+    return [sc * Hn[0] + cu * Hn[6], sc * Hn[1] + cu * Hn[7], sc * Hn[2] + cu * Hn[8],
+      sc * Hn[3] + cv * Hn[6], sc * Hn[4] + cv * Hn[7], sc * Hn[5] + cv * Hn[8],
+      Hn[6], Hn[7], Hn[8]];
+  }
+
+  function growGrid(pts, H) {
+    let inl = [], lastCount = -1;
+    for (let it = 0; it < 10; it++) {
+      const Hi = inv3(H);
+      if (!Hi) return null;
+      const map = new Map();
+      for (const p of pts) {
+        const l = applyH(Hi, p.x, p.y);
+        if (!isFinite(l[0]) || !isFinite(l[1])) continue;
+        const i = Math.round(l[0]), j = Math.round(l[1]);
+        const e = Math.hypot(l[0] - i, l[1] - j);
+        if (e > 0.22 || Math.abs(i) > 20 || Math.abs(j) > 20) continue;
+        const key = i + ',' + j, o = map.get(key);
+        if (!o || e < o.e) map.set(key, { i, j, p, e });
+      }
+      inl = [...map.values()];
+      if (inl.length < 4) return null;
+      const H2 = fitH(inl.map(o => [o.i, o.j]), inl.map(o => [o.p.x, o.p.y]));
+      if (!H2) return null;
+      H = H2;
+      if (inl.length === lastCount) break;
+      lastCount = inl.length;
+    }
+    return { inl, H };
+  }
+
+  function fitGrid(pts) {
+    if (pts.length < 9) return null;
+    const P = pts.map(p => [p.x, p.y]);
+    let mx = 0, my = 0;
+    P.forEach(p => { mx += p[0]; my += p[1]; });
+    mx /= P.length; my /= P.length;
+    const seeds = pts.map((p, k) => k).sort((a, b) => Math.hypot(P[a][0] - mx, P[a][1] - my) - Math.hypot(P[b][0] - mx, P[b][1] - my)).slice(0, 30);
+    let best = null;
+    for (const s of seeds) {
+      const p0 = P[s];
+      const nb = P.map((p, k) => [k, Math.hypot(p[0] - p0[0], p[1] - p0[1])]).filter(o => o[0] !== s).sort((a, b) => a[1] - b[1]).slice(0, 6);
+      for (let a = 0; a < nb.length; a++) for (let c = a + 1; c < nb.length; c++) {
+        const pa = P[nb[a][0]], pc = P[nb[c][0]];
+        const ux = pa[0] - p0[0], uy = pa[1] - p0[1], wx = pc[0] - p0[0], wy = pc[1] - p0[1];
+        const la = nb[a][1], lc = nb[c][1];
+        const cos = (ux * wx + uy * wy) / (la * lc);
+        if (Math.abs(cos) > 0.5 || la / lc > 2 || lc / la > 2) continue;
+        const d = [pa[0] + pc[0] - p0[0], pa[1] + pc[1] - p0[1]];
+        let dk = -1, dd = 0.3 * (la + lc) / 2;
+        P.forEach((p, k) => { const e = Math.hypot(p[0] - d[0], p[1] - d[1]); if (e < dd) { dd = e; dk = k; } });
+        if (dk < 0) continue;
+        const H0 = homography([[0, 0], [1, 0], [0, 1], [1, 1]], [p0, pa, pc, P[dk]]);
+        if (!H0) continue;
+        const g = growGrid(pts, H0);
+        if (!g) continue;
+        const is = g.inl.map(o => o.i), js = g.inl.map(o => o.j);
+        const spanI = Math.max(...is) - Math.min(...is), spanJ = Math.max(...js) - Math.min(...js);
+        if (spanI < 2 || spanJ < 2) continue;
+        if (g.inl.length / ((spanI + 1) * (spanJ + 1)) < 0.6) continue;
+        if (!best || g.inl.length > best.inl.length) best = g;
+        if (best.inl.length >= 0.85 * pts.length) break;
+      }
+      if (best && best.inl.length >= 0.85 * pts.length) break;
+    }
+    return best;
+  }
+
+  // canonical lattice: i axis the more horizontal one pointing right, j pointing down, origin at min corner
+  function canonical(g) {
+    const H = g.H;
+    const c = applyH(H, 0, 0), ci = applyH(H, 1, 0), cj = applyH(H, 0, 1);
+    let di = [ci[0] - c[0], ci[1] - c[1]], dj = [cj[0] - c[0], cj[1] - c[1]];
+    let swap = Math.abs(dj[0]) > Math.abs(di[0]);
+    if (swap) [di, dj] = [dj, di];
+    const si = di[0] < 0 ? -1 : 1, sj = dj[1] < 0 ? -1 : 1;
+    const inl = g.inl.map(o => { let i = o.i, j = o.j; if (swap) [i, j] = [j, i]; return { i: i * si, j: j * sj, p: o.p }; });
+    const i0 = Math.min(...inl.map(o => o.i)), j0 = Math.min(...inl.map(o => o.j));
+    inl.forEach(o => { o.i -= i0; o.j -= j0; });
+    const H2 = fitH(inl.map(o => [o.i, o.j]), inl.map(o => [o.p.x, o.p.y]));
+    return { inl, H: H2, ni: Math.max(...inl.map(o => o.i)), nj: Math.max(...inl.map(o => o.j)) };
+  }
+
+  function detectChess(rgba, w, h) {
+    const g = toGray(rgba, w * h);
+    const corners = chessCorners(g, w, h);
+    if (corners.length < 9) return { ok: false, corners, reason: `Nur ${corners.length} Ecken. Brett näher oder heller.` };
+    const fit = fitGrid(corners);
+    if (!fit || fit.inl.length < 9) return { ok: false, corners, reason: 'Kein Gitter gefunden. Brett leer räumen.' };
+    const c = canonical(fit);
+    if (!c.H) return { ok: false, corners, reason: 'Gitter instabil.' };
+    return { ok: true, corners, inl: c.inl, Hlat: c.H, ni: c.ni, nj: c.nj, reason: '' };
+  }
+
+  const v = {
+    dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+    sc: (a, s) => [a[0] * s, a[1] * s, a[2] * s],
+    add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+    sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+    cr: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+    len: a => Math.hypot(a[0], a[1], a[2]),
+  };
+  v.norm = a => v.sc(a, 1 / v.len(a));
+
+  // quad: 4 image points in cyclic order. prevLong: hysteresis for long-edge decision.
+  function solvePose(quad, w, h, fovDeg, prevLong) {
+    const A = poseFor(quad, w, h, fovDeg, true), B = poseFor(quad, w, h, fovDeg, false);
+    if (!A || !B) return A || B;
+    if (prevLong != null) {
+      const keep = prevLong ? A : B, other = prevLong ? B : A;
+      return other.reproj < keep.reproj * 0.6 - 0.5 ? other : keep;
+    }
+    return A.reproj <= B.reproj ? A : B;
+  }
+
+  function poseFor(quad, w, h, fovDeg, long0) {
+    const W = long0 ? A4L : A4S, H = long0 ? A4S : A4L;
+    const paper = [[0, 0], [W, 0], [W, H], [0, H]];
+    const Hm = homography(paper, quad);
+    if (!Hm) return null;
+    const pose = poseFromH(Hm, w, h, fovDeg, W, H, paper.map((p, k) => [p[0], p[1], quad[k][0], quad[k][1]]));
+    if (pose) pose.long0 = long0;
+    return pose;
+  }
+
+  // Hm: plane mm -> image px. W,H: plane extent (mm). corr: [[X,Y,u,v],...] for reprojection error.
+  function poseFromH(Hm, w, h, fovDeg, W, H, corr) {
+    const f = 0.5 * Math.max(w, h) / Math.tan(fovDeg * Math.PI / 360);
+    const cx = w / 2, cy = h / 2;
+    const col = j => [(Hm[j] - cx * Hm[6 + j]) / f, (Hm[3 + j] - cy * Hm[6 + j]) / f, Hm[6 + j]];
+    let a = col(0), b = col(1), t = col(2);
+    const lam = 2 / (v.len(a) + v.len(b));
+    a = v.sc(a, lam); b = v.sc(b, lam); t = v.sc(t, lam);
+    if (t[2] < 0) { a = v.sc(a, -1); b = v.sc(b, -1); t = v.sc(t, -1); }
+    const r1 = v.norm(a);
+    const r2 = v.norm(v.sub(b, v.sc(r1, v.dot(r1, b))));
+    let r3 = v.cr(r1, r2);
+    const P0 = v.add(v.add(v.sc(r1, W / 2), v.sc(r2, H / 2)), t);
+    if (v.dot(r3, P0) > 0) r3 = v.sc(r3, -1);
+    const pose = { W, H, Hm, Hinv: inv3(Hm), r1, r2, r3, t, f, cx, cy, dist: v.len(P0) };
+    let err = 0;
+    corr.forEach(c => { const q = project(pose, c[0], c[1], 0); err += q ? Math.hypot(q[0] - c[2], q[1] - c[3]) : 99; });
+    pose.reproj = err / Math.max(1, corr.length);
+    pose.fovEst = estimateFov(Hm, w, h);
+    return pose;
+  }
+
+  function estimateFov(Hm, w, h) {
+    const cx = w / 2, cy = h / 2;
+    const a = [Hm[0] - cx * Hm[6], Hm[3] - cy * Hm[6], Hm[6]];
+    const b = [Hm[1] - cx * Hm[7], Hm[4] - cy * Hm[7], Hm[7]];
+    const ests = [];
+    const d1 = a[2] * b[2];
+    const s1 = a[0] * b[0] + a[1] * b[1];
+    if (Math.abs(d1) > 1e-14) { const f2 = -s1 / d1; if (f2 > 0) ests.push(f2); }
+    const d2 = b[2] * b[2] - a[2] * a[2];
+    if (Math.abs(d2) > 1e-14) { const f2 = (a[0] * a[0] + a[1] * a[1] - b[0] * b[0] - b[1] * b[1]) / d2; if (f2 > 0) ests.push(f2); }
+    if (!ests.length) return null;
+    const f = Math.sqrt(ests.reduce((s, x) => s + x, 0) / ests.length);
+    const fov = 2 * Math.atan(0.5 * Math.max(w, h) / f) * 180 / Math.PI;
+    return fov > 25 && fov < 120 ? fov : null;
+  }
+
+  function project(P, X, Y, Z) {
+    const x = P.r1[0] * X + P.r2[0] * Y + P.r3[0] * Z + P.t[0];
+    const y = P.r1[1] * X + P.r2[1] * Y + P.r3[1] * Z + P.t[1];
+    const z = P.r1[2] * X + P.r2[2] * Y + P.r3[2] * Z + P.t[2];
+    if (z < 1) return null;
+    return [P.f * x / z + P.cx, P.f * y / z + P.cy, z];
+  }
+
+  // Synthetic test photo: A4 with three dots and a pen stroke on a dark desk.
+  function synth(w, h, opts = {}) {
+    const fov = opts.fov || 65, tilt = (opts.tilt ?? 48) * Math.PI / 180, rot = (opts.rot ?? 18) * Math.PI / 180;
+    const f = 0.5 * Math.max(w, h) / Math.tan(fov * Math.PI / 360);
+    const ca = Math.cos(tilt), sa = Math.sin(tilt), cg = Math.cos(rot), sg = Math.sin(rot);
+    const chess = opts.target === 'chess', sq = opts.square || 40, bd = 22;
+    const PW = chess ? 8 * sq + 2 * bd : A4L, PH = chess ? 8 * sq + 2 * bd : A4S;
+    const proj = (X, Y) => {
+      let x = X - PW / 2, y = Y - PH / 2, z = 0;
+      [x, y] = [cg * x - sg * y, sg * x + cg * y];
+      [y, z] = [ca * y + sa * z, -sa * y + ca * z];
+      z += opts.dist || 430; y += 10;
+      return [f * x / z + w / 2, f * y / z + h / 2];
+    };
+    const paper = [[0, 0], [PW, 0], [PW, PH], [0, PH]];
+    const Hi = inv3(homography(paper, paper.map(p => proj(p[0], p[1]))));
+    const dots = opts.dots || [[62, 52, 7], [232, 74, 6], [128, 168, 8]];
+    const out = new Uint8ClampedArray(w * h * 4);
+    let seed = 7;
+    const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647 - 0.5; };
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const [X, Y] = applyH(Hi, x + 0.5, y + 0.5);
+      let r, gg, b;
+      if (chess && X >= 0 && X <= PW && Y >= 0 && Y <= PH) {
+        let l;
+        if (X < bd || Y < bd || X > PW - bd || Y > PH - bd) l = 95 + rnd() * 6;
+        else l = ((Math.floor((X - bd) / sq) + Math.floor((Y - bd) / sq)) & 1) ? 48 + rnd() * 6 : 214 - X * 0.05 + rnd() * 6;
+        r = l + 6; gg = l + 2; b = l - 4;
+      } else if (!chess && X >= 0 && X <= A4L && Y >= 0 && Y <= A4S) {
+        let l = 226 - X * 0.07 - Y * 0.04 + rnd() * 6;
+        for (let k = 0; k < dots.length; k++) {
+          const [dx, dy, rr] = dots[k];
+          const ang = Math.atan2(Y - dy, X - dx);
+          if (Math.hypot(X - dx, Y - dy) < rr * (1 + 0.12 * Math.sin(5 * ang + k))) l = 34 + rnd() * 8;
+        }
+        const sx = 175, sy = 150, ex = 262, ey = 170;
+        const tt = Math.max(0, Math.min(1, ((X - sx) * (ex - sx) + (Y - sy) * (ey - sy)) / ((ex - sx) ** 2 + (ey - sy) ** 2)));
+        if (Math.hypot(X - (sx + tt * (ex - sx)), Y - (sy + tt * (ey - sy)) - 3 * Math.sin(tt * 20)) < 0.7) l = 60;
+        r = l; gg = l; b = l - 4;
+      } else {
+        const l = 52 + 10 * Math.sin(y * 0.02 + x * 0.004) + rnd() * 8;
+        r = l + 14; gg = l + 4; b = l - 6;
+      }
+      const i = (y * w + x) * 4;
+      out[i] = r; out[i + 1] = gg; out[i + 2] = b; out[i + 3] = 255;
+    }
+    return out;
+  }
+
+  return { detect, detectChess, poseFromH, solvePose, project, applyH, inv3, homography, synth, v, A4L, A4S };
+})();
+
+
+</script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const view = $('view'), ctx = view.getContext('2d');
+  const proc = $('proc'), pctx = proc.getContext('2d', { willReadFrequently: true });
+  const video = $('video');
+  const V = Core.v;
+  const COL = { accent: '#ffb547', x: '#ff6b5e', y: '#4cd47a', z: '#4aa3ff', wall: 'rgba(74,163,255,0.18)', wallLine: '#7fbfff', floor: 'rgba(255,181,71,0.20)' };
+
+  let mode = 'raum', live = false, stream = null;
+  let target = 'a4', tool = 'overlay', taps = [], model = null, kiDets = [], kiBusy = false, kiFrame = 0;
+  const DEVICES = [ // ca.-Außenmaße in mm (Höhe × Breite), Herstellerangaben gerundet
+    ['iPhone SE / mini', 138, 67], ['iPhone 6,1" (15/16)', 147.6, 71.6], ['iPhone Pro 6,3"', 149.6, 71.5],
+    ['iPhone Air', 156.2, 74.7], ['iPhone Plus / Pro Max', 162, 77.7], ['iPad mini', 195.4, 134.8],
+    ['iPad / iPad Air 11"', 248, 179], ['iPad Air/Pro 13"', 281, 215], ['MacBook Air 13"', 304, 215],
+    ['A4-Blatt', 297, 210], ['Kreditkarte', 85.6, 54], ['AirPods-Pro-Case', 60.6, 45.2],
+  ];
+  function matchDevice(a, b) {
+    const L = Math.max(a, b), S = Math.min(a, b);
+    const r = DEVICES.map(([n, h, w]) => ({ n, e: Math.hypot((L - h) / h, (S - w) / w) })).sort((x, y) => x.e - y.e);
+    if (r[0].e > 0.15) return 'kein Treffer';
+    const pct = x => Math.round(x.e * 100);
+    return r[0].n + ` (±${pct(r[0])}%)` + (r[1].e < 0.15 ? `, sonst ${r[1].n}` : '');
+  }
+  let src = null, sw = 0, sh = 0;   // current source
+  let last = null;                  // {det, pose, pw, ph, ms}
+  let prevQuad = null, prevLong = null, prevDots = null;
+
+  const fovIn = $('fov');
+  const fov = () => +fovIn.value;
+  fovIn.addEventListener('input', () => { $('fovVal').textContent = fov() + '°'; if (!live && src) runOnce(); });
+  $('btnFovAuto').addEventListener('click', () => {
+    if (last && last.pose && last.pose.fovEst) { fovIn.value = Math.round(last.pose.fovEst); fovIn.dispatchEvent(new Event('input')); }
+    else msg('Keine verlässliche Schätzung. Blatt schräger halten.');
+  });
+  function segGroup(id, fn) {
+    const bs = document.querySelectorAll('#' + id + ' button');
+    bs.forEach(b => b.addEventListener('click', () => { bs.forEach(x => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); fn(b); }));
+  }
+  segGroup('segMode', b => { mode = b.dataset.mode; if (!live) render(); });
+  segGroup('segTarget', b => {
+    target = b.dataset.target; $('sqWrap').hidden = target !== 'chess';
+    taps = []; resetTrack();
+    if (!live) { if (src && src.dataset && src.dataset.demo) loadDemo(); else if (src) runOnce(); }
+  });
+  segGroup('segTool', b => {
+    tool = b.dataset.tool;
+    $('measRow').hidden = tool !== 'messen';
+    $('segMode').hidden = tool !== 'overlay';
+    if (tool === 'ki') loadModel(); else { kiDets = []; $('rKi').textContent = 'aus'; }
+    if (!live) render();
+  });
+  $('sq').addEventListener('input', () => { taps = []; if (!live && src) runOnce(); });
+  $('btnMeasReset').addEventListener('click', () => { taps = []; if (!live) render(); });
+
+  // taps land on the plane (mm) so they stay anchored while the camera moves
+  view.addEventListener('pointerdown', e => {
+    if (tool !== 'messen' || !last || !last.pose) return;
+    const rc = view.getBoundingClientRect();
+    const k = last.pw / rc.width;
+    const x = (e.clientX - rc.left) * k, y = (e.clientY - rc.top) * k;
+    const mm = Core.applyH(last.pose.Hinv, x, y);
+    if (!isFinite(mm[0])) return;
+    if (taps.length >= 4) taps = [];
+    taps.push(mm);
+    if (!live) render();
+  });
+
+  function loadScript(url) {
+    return new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = url; sc.onload = res; sc.onerror = rej; document.head.appendChild(sc); });
+  }
+  async function loadModel() {
+    if (model) { runKi(); return; }
+    $('rKi').textContent = 'lädt …';
+    try {
+      if (!window.tf) await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js');
+      if (!window.cocoSsd) await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js');
+      model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+      $('rKi').textContent = 'bereit';
+      runKi();
+    } catch (err) {
+      $('rKi').textContent = 'blockiert';
+      msg('KI-Modell lädt hier nicht: Der Viewer sperrt Downloads von Google-Servern. Selbst gehostet funktioniert es.');
+    }
+  }
+  const KI_DE = { 'cell phone': 'Handy/Tablet', laptop: 'Laptop', tv: 'Monitor/TV', keyboard: 'Tastatur', mouse: 'Maus', remote: 'Fernbedienung', cup: 'Tasse', book: 'Buch', bottle: 'Flasche', scissors: 'Schere', clock: 'Uhr', person: 'Person', chair: 'Stuhl' };
+  async function runKi() {
+    if (!model || kiBusy || tool !== 'ki' || !src) return;
+    kiBusy = true;
+    try {
+      const res = await model.detect(src, 10, 0.4);
+      const k = last ? last.pw / sw : 1;
+      kiDets = res.map(d => ({ cls: d.class, name: KI_DE[d.class] || d.class, score: d.score, box: d.bbox.map(x => x * k) }));
+      $('rKi').textContent = kiDets.length ? kiDets.map(d => d.name).join(', ') : 'nichts erkannt';
+    } catch (err) { kiDets = []; }
+    kiBusy = false;
+    if (!live) render();
+  }
+  $('grid').addEventListener('change', () => { if (!live) render(); });
+  $('debug').addEventListener('change', () => { if (!live) render(); });
+
+  function msg(t) { $('msg').textContent = t || ''; }
+
+  // ---------- sources ----------
+  $('btnDemo').addEventListener('click', () => { stopLive(); loadDemo(); });
+  $('photo').addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    stopLive();
+    const img = new Image();
+    img.onload = () => { src = img; sw = img.naturalWidth; sh = img.naturalHeight; resetTrack(); runOnce(); msg(''); };
+    img.onerror = () => msg('Bild konnte nicht geladen werden.');
+    img.src = URL.createObjectURL(f);
+    e.target.value = '';
+  });
+  $('btnLive').addEventListener('click', async () => {
+    if (live) { stopLive(); return; }
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('nomedia');
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } });
+      video.srcObject = stream;
+      await video.play();
+      live = true; resetTrack();
+      $('btnLive').textContent = 'Live stoppen';
+      msg('');
+      requestAnimationFrame(loop);
+    } catch (err) {
+      msg('Live-Kamera ist hier blockiert. „Foto aufnehmen“ nutzen oder Datei per HTTPS selbst hosten.');
+    }
+  });
+  function stopLive() {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null; live = false;
+    $('btnLive').textContent = 'Live-Kamera';
+  }
+  function resetTrack() { prevQuad = null; prevLong = null; prevDots = null; }
+
+  function loadDemo() {
+    const w = 1200, h = 900;
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const opts = target === 'chess' ? { target: 'chess', square: +$('sq').value || 50, tilt: 42, rot: 14, dist: 820 } : { tilt: 46, rot: 16 };
+    const id = new ImageData(Core.synth(w, h, opts), w, h);
+    c.getContext('2d').putImageData(id, 0, 0);
+    c.dataset.demo = '1';
+    src = c; sw = w; sh = h; resetTrack(); runOnce();
+  }
+
+  // ---------- processing ----------
+  function process(maxSide, smooth) {
+    const t0 = performance.now();
+    const k = Math.min(1, maxSide / Math.max(sw, sh));
+    const pw = Math.round(sw * k), ph = Math.round(sh * k);
+    if (proc.width !== pw || proc.height !== ph) { proc.width = pw; proc.height = ph; }
+    pctx.drawImage(src, 0, 0, pw, ph);
+    const data = pctx.getImageData(0, 0, pw, ph).data;
+    let det, pose = null;
+    if (target === 'chess') {
+      det = Core.detectChess(data, pw, ph);
+      det.target = 'chess';
+      if (det.ok) {
+        const s = +$('sq').value || 50;
+        const W = det.ni * s, H = det.nj * s;
+        const rect = [[0, 0], [W, 0], [W, H], [0, H]];
+        const Hm0 = Core.homography(rect, rect.map(p => Core.applyH(det.Hlat, p[0] / s, p[1] / s)));
+        let quad = rect.map(p => Core.applyH(Hm0, p[0], p[1]));
+        if (smooth) {
+          if (prevQuad && prevLong === W + 'x' + H) quad = smoothQuad(quad, false); else prevQuad = quad;
+          prevLong = W + 'x' + H;
+        }
+        const Hm = Core.homography(rect, quad);
+        pose = Hm && Core.poseFromH(Hm, pw, ph, fov(), W, H, det.inl.map(o => [o.i * s, o.j * s, o.p.x, o.p.y]));
+        if (pose) pose.sq = s;
+      } else if (smooth) prevQuad = null;
+      last = { det, pose, pw, ph, ms: performance.now() - t0 };
+      return;
+    }
+    det = Core.detect(data, pw, ph);
+    if (det.quad && !det.reason.startsWith('Blatt verdeckt') && !det.reason.startsWith('Blattform')) {
+      if (smooth) det.quad = smoothQuad(det.quad);
+      pose = Core.solvePose(det.quad, pw, ph, fov(), prevLong);
+      if (pose) prevLong = pose.long0;
+      if (smooth && det.dots) det.dots = smoothDots(det.dots);
+    } else if (smooth) { prevQuad = null; prevDots = null; }
+    last = { det, pose, pw, ph, ms: performance.now() - t0 };
+  }
+
+  function smoothQuad(q, allowPerm = true) {
+    if (!prevQuad) { prevQuad = q; return q; }
+    let best = null, bestD = Infinity;
+    for (const dir of allowPerm ? [1, -1] : [1]) for (let s = 0; s < (allowPerm ? 4 : 1); s++) {
+      const perm = [0, 1, 2, 3].map(i => q[((s + dir * i) % 4 + 4) % 4]);
+      const d = perm.reduce((a, p, i) => a + Math.hypot(p[0] - prevQuad[i][0], p[1] - prevQuad[i][1]), 0);
+      if (d < bestD) { bestD = d; best = perm; }
+    }
+    if (bestD / 4 > 20) { prevQuad = q; prevLong = null; return q; }
+    const a = bestD / 4 < 2 ? 0.35 : 0.65;
+    prevQuad = best.map((p, i) => [prevQuad[i][0] + (p[0] - prevQuad[i][0]) * a, prevQuad[i][1] + (p[1] - prevQuad[i][1]) * a]);
+    return prevQuad;
+  }
+  function smoothDots(ds) {
+    if (!prevDots || ds.length !== prevDots.length) { prevDots = ds; return ds; }
+    prevDots = ds.map(d => {
+      let n = null, nd = 12;
+      for (const p of prevDots) { const dd = Math.hypot(p[0] - d[0], p[1] - d[1]); if (dd < nd) { nd = dd; n = p; } }
+      return n ? [n[0] + (d[0] - n[0]) * 0.5, n[1] + (d[1] - n[1]) * 0.5] : d;
+    });
+    return prevDots;
+  }
+
+  function runOnce() { process(900, false); render(); if (tool === 'ki') runKi(); }
+
+  function loop() {
+    if (!live) return;
+    if (video.readyState >= 2 && video.videoWidth) {
+      src = video; sw = video.videoWidth; sh = video.videoHeight;
+      process(420, true);
+      render();
+      if (tool === 'ki' && ++kiFrame % 4 === 0) runKi();
+    }
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- geometry helpers in paper mm ----------
+  function frame(pose, det) {
+    // returns anchor frame in paper mm: origin O, in-plane unit ex, ey, labeled dots
+    if (det.ok && det.dots && det.dots.length === 3) {
+      const P = det.dots.map(d => Core.applyH(pose.Hinv, d[0], d[1]));
+      const opp = i => { const a = P[(i + 1) % 3], b = P[(i + 2) % 3]; return Math.hypot(a[0] - b[0], a[1] - b[1]); };
+      const idx = [0, 1, 2].sort((i, j) => opp(j) - opp(i));
+      const L = idx.map(i => ({ mm: P[i], px: det.dots[i] }));
+      const [A, B, C] = L.map(l => l.mm);
+      const d = Math.hypot(B[0] - A[0], B[1] - A[1]);
+      const ex = [(B[0] - A[0]) / d, (B[1] - A[1]) / d];
+      let ey = [-ex[1], ex[0]];
+      if ((C[0] - A[0]) * ey[0] + (C[1] - A[1]) * ey[1] < 0) ey = [-ey[0], -ey[1]];
+      const G = [(A[0] + B[0] + C[0]) / 3, (A[1] + B[1] + C[1]) / 3];
+      return { dots: L, A, B, C, G, ex, ey, ab: d };
+    }
+    if (det.target === 'chess') return { dots: null, G: [pose.W / 2, pose.H / 2], A: [0, 0], ex: [1, 0], ey: [0, 1], ab: pose.W, k: pose.sq / 25 };
+    return { dots: null, G: [pose.W / 2, pose.H / 2], A: [pose.W / 2, pose.H / 2], ex: [1, 0], ey: [0, 1], ab: 120 };
+  }
+  const at = (F, o, u, w2) => [o[0] + F.ex[0] * u + F.ey[0] * w2, o[1] + F.ex[1] * u + F.ey[1] * w2];
+
+  // ---------- rendering ----------
+  let lastSize = '';
+  function render() {
+    if (!src) return;
+    const cssW = view.clientWidth || 800;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const cw = Math.round(cssW * dpr), ch = Math.round(cssW * dpr * sh / sw);
+    const key = cw + 'x' + ch;
+    if (key !== lastSize) { view.width = cw; view.height = ch; lastSize = key; }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(src, 0, 0, cw, ch);
+    if (!last) return;
+    const { det, pose, pw } = last;
+    const s = cw / pw, lw = Math.max(1.5, 2 * dpr);
+    const P = (X, Y, Z) => { const q = Core.project(pose, X, Y, Z || 0); return q ? [q[0] * s, q[1] * s, q[2]] : null; };
+
+    if ($('debug').checked && det.corners) {
+      det.corners.forEach(c => { ctx.fillStyle = COL.x; ctx.fillRect(c.x * s - 2 * dpr, c.y * s - 2 * dpr, 4 * dpr, 4 * dpr); });
+      if (det.inl) det.inl.forEach(o => { ctx.fillStyle = COL.y; ctx.fillRect(o.p.x * s - 3 * dpr, o.p.y * s - 3 * dpr, 6 * dpr, 6 * dpr); });
+    }
+    if ($('debug').checked && det.cands) {
+      det.cands.forEach(c => {
+        ctx.strokeStyle = c.ok ? COL.y : COL.x; ctx.lineWidth = 1 * dpr;
+        ctx.strokeRect(c.minx * s, c.miny * s, (c.maxx - c.minx + 1) * s, (c.maxy - c.miny + 1) * s);
+      });
+      if (det.quad) det.quad.forEach((p, i) => label(i + '', p[0] * s, p[1] * s, '#000', '#fff', dpr));
+    }
+
+    let status = 'err', statusText = det.reason || 'Kein Blatt';
+    if (pose) {
+      // paper outline
+      ctx.setLineDash([6 * dpr, 5 * dpr]); ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = lw * 0.8;
+      poly([[0, 0], [pose.W, 0], [pose.W, pose.H], [0, pose.H]].map(p => P(p[0], p[1], 0)), true, false);
+      ctx.setLineDash([]);
+      if (det.target === 'chess') drawLattice(pose, P, lw);
+      if ($('grid').checked) drawGrid(pose, P, lw);
+      const F = frame(pose, det);
+      if (tool === 'overlay') drawMode(F, P, lw, dpr);
+      if (F.dots) drawDots(F, P, lw, dpr);
+      if (tool === 'messen') drawTaps(P, lw, dpr);
+      if (det.target === 'chess') { status = 'ok'; statusText = `Schachbrett, ${det.inl.length} Ecken (${det.ni + 1}×${det.nj + 1})`; }
+      else { status = F.dots ? 'ok' : 'warn'; statusText = F.dots ? 'Blatt + 3 Punkte' : (det.reason || 'Nur Blatt'); }
+      updateReadout(F, pose);
+    } else updateReadout(null, null);
+    if (tool === 'ki') drawKi(s, lw, dpr);
+    if (tool !== 'messen') { $('rMeas').textContent = '–'; }
+    const b = $('badge'); b.dataset.s = status; b.textContent = statusText;
+    $('rStatus').textContent = statusText;
+    $('rMs').textContent = last.ms.toFixed(0) + ' ms @ ' + last.pw + ' px';
+  }
+
+  function poly(pts, close, fill) {
+    if (pts.some(p => !p)) return;
+    ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+    if (close) ctx.closePath();
+    if (fill) ctx.fill();
+    ctx.stroke();
+  }
+  function line(a, b) { if (!a || !b) return; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); }
+  function label(t, x, y, bg, fg, dpr) {
+    ctx.font = `500 ${12 * dpr}px "IBM Plex Mono", monospace`;
+    const w = ctx.measureText(t).width + 8 * dpr, h = 18 * dpr;
+    ctx.fillStyle = bg; ctx.fillRect(x - w / 2, y - h / 2, w, h);
+    ctx.fillStyle = fg; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(t, x, y + 0.5);
+  }
+
+  // faces: [{pts:[[X,Y,Z]...], fill, stroke}]
+  function drawFaces(faces, P, lw) {
+    const list = [];
+    for (const f of faces) {
+      const pts = f.pts.map(v => P(v[0], v[1], v[2]));
+      if (pts.some(p => !p)) continue;
+      list.push({ pts, z: pts.reduce((a, p) => a + p[2], 0) / pts.length, f });
+    }
+    list.sort((a, b) => b.z - a.z);
+    for (const o of list) {
+      ctx.fillStyle = o.f.fill; ctx.strokeStyle = o.f.stroke; ctx.lineWidth = lw;
+      ctx.lineJoin = 'round';
+      poly(o.pts, true, true);
+    }
+  }
+
+  function drawGrid(pose, P, lw) {
+    ctx.strokeStyle = 'rgba(255,181,71,0.35)'; ctx.lineWidth = lw * 0.5;
+    for (let x = 0; x <= pose.W + 0.1; x += 30) line(P(x, 0, 0), P(x, pose.H, 0));
+    for (let y = 0; y <= pose.H + 0.1; y += 30) line(P(0, y, 0), P(pose.W, y, 0));
+  }
+
+  function drawMode(F, P, lw, dpr) {
+    const up = (p, z) => [p[0], p[1], z];
+    if (mode === 'achsen') {
+      const o = F.A, L = 60 * (F.k || 1);
+      const X = at(F, o, L, 0), Y = at(F, o, 0, L);
+      ctx.lineWidth = lw * 1.6;
+      ctx.strokeStyle = COL.x; line(P(o[0], o[1], 0), P(X[0], X[1], 0));
+      ctx.strokeStyle = COL.y; line(P(o[0], o[1], 0), P(Y[0], Y[1], 0));
+      ctx.strokeStyle = COL.z; line(P(o[0], o[1], 0), P(o[0], o[1], L));
+      const lx = P(X[0], X[1], 0), ly = P(Y[0], Y[1], 0), lz = P(o[0], o[1], L);
+      if (lx) label('X', lx[0], lx[1], COL.x, '#111', dpr);
+      if (ly) label('Y', ly[0], ly[1], COL.y, '#111', dpr);
+      if (lz) label('Z', lz[0], lz[1], COL.z, '#111', dpr);
+    } else if (mode === 'pyramide') {
+      const base = F.dots ? [F.A, F.B, F.C] : [at(F, F.G, -50 * (F.k || 1), -40 * (F.k || 1)), at(F, F.G, 50 * (F.k || 1), -40 * (F.k || 1)), at(F, F.G, 0, 45 * (F.k || 1))];
+      const side = (Math.hypot(base[0][0] - base[1][0], base[0][1] - base[1][1]) + Math.hypot(base[1][0] - base[2][0], base[1][1] - base[2][1]) + Math.hypot(base[2][0] - base[0][0], base[2][1] - base[0][1])) / 3;
+      const G = [(base[0][0] + base[1][0] + base[2][0]) / 3, (base[0][1] + base[1][1] + base[2][1]) / 3];
+      const T = [G[0], G[1], side * 0.8];
+      const b3 = base.map(p => up(p, 0));
+      drawFaces([
+        { pts: b3, fill: 'rgba(255,181,71,0.15)', stroke: COL.accent },
+        { pts: [b3[0], b3[1], T], fill: 'rgba(255,181,71,0.35)', stroke: COL.accent },
+        { pts: [b3[1], b3[2], T], fill: 'rgba(255,181,71,0.25)', stroke: COL.accent },
+        { pts: [b3[2], b3[0], T], fill: 'rgba(255,181,71,0.45)', stroke: COL.accent },
+      ], P, lw);
+    } else if (mode === 'prisma') {
+      const base = F.dots ? [F.A, F.B, F.C] : [at(F, F.G, -50 * (F.k || 1), -40 * (F.k || 1)), at(F, F.G, 50 * (F.k || 1), -40 * (F.k || 1)), at(F, F.G, 0, 45 * (F.k || 1))];
+      const hgt = 40 * (F.k || 1), b = base.map(p => up(p, 0)), t = base.map(p => up(p, hgt));
+      drawFaces([
+        { pts: b, fill: 'rgba(74,163,255,0.12)', stroke: COL.wallLine },
+        { pts: t, fill: 'rgba(74,163,255,0.35)', stroke: COL.wallLine },
+        { pts: [b[0], b[1], t[1], t[0]], fill: 'rgba(74,163,255,0.22)', stroke: COL.wallLine },
+        { pts: [b[1], b[2], t[2], t[1]], fill: 'rgba(74,163,255,0.18)', stroke: COL.wallLine },
+        { pts: [b[2], b[0], t[0], t[2]], fill: 'rgba(74,163,255,0.28)', stroke: COL.wallLine },
+      ], P, lw);
+    } else if (mode === 'wuerfel') {
+      const e = 60 * (F.k || 1), hgt = e;
+      const c = [[-e / 2, -e / 2], [e / 2, -e / 2], [e / 2, e / 2], [-e / 2, e / 2]].map(q => at(F, F.G, q[0], q[1]));
+      const b = c.map(p => up(p, 0)), t = c.map(p => up(p, hgt));
+      const shade = ['rgba(255,181,71,0.30)', 'rgba(255,181,71,0.22)', 'rgba(255,181,71,0.38)', 'rgba(255,181,71,0.26)'];
+      const faces = [{ pts: b, fill: 'rgba(255,181,71,0.10)', stroke: COL.accent }, { pts: t, fill: 'rgba(255,181,71,0.45)', stroke: COL.accent }];
+      for (let i = 0; i < 4; i++) { const j = (i + 1) % 4; faces.push({ pts: [b[i], b[j], t[j], t[i]], fill: shade[i], stroke: COL.accent }); }
+      drawFaces(faces, P, lw);
+    } else if (mode === 'raum') {
+      // L-shaped floor plan in metres, corner at A, first wall along A->B (4 m)
+      const plan = [[0, 0], [4, 0], [4, 3], [2.5, 3], [2.5, 4.5], [0, 4.5]];
+      const k = F.ab / 4;                 // mm on paper per metre
+      const wallH = 2.5 * k;
+      const pts = plan.map(q => at(F, F.A, q[0] * k, q[1] * k));
+      const faces = [{ pts: pts.map(p => up(p, 0)), fill: COL.floor, stroke: COL.accent }];
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i], b = pts[(i + 1) % pts.length];
+        faces.push({ pts: [up(a, 0), up(b, 0), up(b, wallH), up(a, wallH)], fill: COL.wall, stroke: COL.wallLine });
+      }
+      drawFaces(faces, P, lw);
+    }
+  }
+
+  function drawLattice(pose, P, lw) {
+    ctx.strokeStyle = 'rgba(255,181,71,0.55)'; ctx.lineWidth = lw * 0.6;
+    for (let x = 0; x <= pose.W + 0.01; x += pose.sq) line(P(x, 0, 0), P(x, pose.H, 0));
+    for (let y = 0; y <= pose.H + 0.01; y += pose.sq) line(P(0, y, 0), P(pose.W, y, 0));
+  }
+
+  function drawTaps(P, lw, dpr) {
+    if (!taps.length) { $('rMeas').textContent = 'tippe aufs Bild'; $('rDev').textContent = '–'; return; }
+    const pts = taps.map(t => P(t[0], t[1], 0));
+    ctx.strokeStyle = COL.accent; ctx.lineWidth = lw * 1.3;
+    if (taps.length === 4) { ctx.fillStyle = 'rgba(255,181,71,0.18)'; poly(pts, true, true); }
+    else for (let i = 1; i < pts.length; i++) line(pts[i - 1], pts[i]);
+    const d = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+    const segs = [];
+    const n = taps.length === 4 ? 4 : taps.length - 1;
+    for (let i = 0; i < n; i++) {
+      const a = taps[i], b = taps[(i + 1) % taps.length], m = P((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 0);
+      segs.push(d(a, b));
+      if (m) label(d(a, b).toFixed(1) + ' mm', m[0], m[1], 'rgba(14,17,19,0.85)', '#e6ebee', dpr);
+    }
+    pts.forEach(p => { if (!p) return; ctx.fillStyle = COL.accent; ctx.beginPath(); ctx.arc(p[0], p[1], 5 * dpr, 0, Math.PI * 2); ctx.fill(); });
+    if (taps.length === 4) {
+      const a = (segs[0] + segs[2]) / 2, b = (segs[1] + segs[3]) / 2;
+      $('rMeas').textContent = `${Math.max(a, b).toFixed(0)} × ${Math.min(a, b).toFixed(0)} mm`;
+      $('rDev').textContent = matchDevice(a, b);
+    } else {
+      $('rMeas').textContent = segs.length ? segs.reduce((x, y) => x + y, 0).toFixed(1) + ' mm' : '1 Punkt';
+      $('rDev').textContent = '4 Ecken tippen';
+    }
+  }
+
+  function drawKi(s, lw, dpr) {
+    const pose = last && last.pose;
+    kiDets.forEach(d => {
+      const [x, y, w, h] = d.box;
+      ctx.strokeStyle = COL.z; ctx.lineWidth = lw;
+      ctx.strokeRect(x * s, y * s, w * s, h * s);
+      let t = `${d.name} ${Math.round(d.score * 100)}%`;
+      if (pose && ['cell phone', 'laptop', 'tv', 'book', 'keyboard', 'remote', 'mouse'].includes(d.cls)) {
+        // assumes the object lies flat on the reference plane
+        const c = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]].map(p => Core.applyH(pose.Hinv, p[0], p[1]));
+        if (c.every(p => isFinite(p[0]))) {
+          const dd = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+          const a = (dd(c[0], c[1]) + dd(c[3], c[2])) / 2, b = (dd(c[0], c[3]) + dd(c[1], c[2])) / 2;
+          if (a < 2000 && b < 2000) {
+            t += ` · ≈${Math.max(a, b).toFixed(0)}×${Math.min(a, b).toFixed(0)} mm`;
+            const m = matchDevice(a, b);
+            if (m !== 'kein Treffer') t += ' → ' + m.split(' (')[0];
+          }
+        }
+      }
+      ctx.font = `500 ${12 * dpr}px "IBM Plex Mono", monospace`;
+      const tw = ctx.measureText(t).width + 10 * dpr;
+      ctx.fillStyle = COL.z; ctx.fillRect(x * s, y * s - 20 * dpr, tw, 20 * dpr);
+      ctx.fillStyle = '#0b1622'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(t, x * s + 5 * dpr, y * s - 10 * dpr);
+    });
+  }
+
+  function drawDots(F, P, lw, dpr) {
+    const names = ['A', 'B', 'C'];
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = lw;
+    for (let i = 0; i < 3; i++) {
+      const a = F.dots[i].mm, b = F.dots[(i + 1) % 3].mm;
+      const pa = P(a[0], a[1], 0), pb = P(b[0], b[1], 0);
+      line(pa, pb);
+    }
+    for (let i = 0; i < 3; i++) {
+      const a = F.dots[i].mm, b = F.dots[(i + 1) % 3].mm;
+      const m = P((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 0);
+      if (m) label(Math.hypot(a[0] - b[0], a[1] - b[1]).toFixed(0) + ' mm', m[0], m[1], 'rgba(14,17,19,0.85)', '#e6ebee', dpr);
+    }
+    F.dots.forEach((d, i) => {
+      const p = P(d.mm[0], d.mm[1], 0);
+      if (!p) return;
+      ctx.strokeStyle = COL.accent; ctx.lineWidth = lw * 1.4;
+      ctx.beginPath(); ctx.arc(p[0], p[1], 12 * dpr, 0, Math.PI * 2); ctx.stroke();
+      label(names[i], p[0] + 20 * dpr, p[1] - 16 * dpr, COL.accent, '#1a1205', dpr);
+    });
+  }
+
+  function updateReadout(F, pose) {
+    const set = (id, t) => { $(id).textContent = t; };
+    if (!pose) { ['rAB', 'rBC', 'rCA', 'rAng', 'rArea', 'rDist', 'rTilt', 'rFov', 'rRep', 'rRoom'].forEach(i => set(i, '–')); return; }
+    set('rDist', (pose.dist / 10).toFixed(1) + ' cm');
+    const tilt = Math.acos(Math.min(1, Math.abs(pose.r3[2]))) * 180 / Math.PI;
+    set('rTilt', tilt.toFixed(0) + '°');
+    set('rFov', pose.fovEst ? pose.fovEst.toFixed(1) + '°' : 'unsicher');
+    set('rRep', pose.reproj.toFixed(2) + ' px');
+    if (!F || !F.dots) { ['rAB', 'rBC', 'rCA', 'rAng', 'rArea', 'rRoom'].forEach(i => set(i, '–')); return; }
+    const { A, B, C } = F;
+    const d = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
+    const ab = d(A, B), bc = d(B, C), ca = d(C, A);
+    set('rAB', ab.toFixed(1) + ' mm'); set('rBC', bc.toFixed(1) + ' mm'); set('rCA', ca.toFixed(1) + ' mm');
+    const ang = (a, b, c) => Math.acos(Math.max(-1, Math.min(1, (b * b + c * c - a * a) / (2 * b * c)))) * 180 / Math.PI;
+    set('rAng', [ang(bc, ab, ca), ang(ca, ab, bc), ang(ab, bc, ca)].map(x => x.toFixed(0) + '°').join(' / '));
+    const area = Math.abs((B[0] - A[0]) * (C[1] - A[1]) - (C[0] - A[0]) * (B[1] - A[1])) / 2;
+    set('rArea', (area / 100).toFixed(1) + ' cm²');
+    const k = F.ab / 4, rc = [((C[0] - A[0]) * F.ex[0] + (C[1] - A[1]) * F.ex[1]) / k, ((C[0] - A[0]) * F.ey[0] + (C[1] - A[1]) * F.ey[1]) / k];
+    set('rRoom', `x ${rc[0].toFixed(2)} m, y ${rc[1].toFixed(2)} m`);
+  }
+
+  window.addEventListener('resize', () => { lastSize = ''; if (!live) render(); });
+  loadDemo();
+})();
+</script>
+</body>
+</html>
