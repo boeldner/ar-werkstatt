@@ -638,7 +638,7 @@ const Core = (() => {
     const Hi = inv3(homography(paper, paper.map(p => proj(p[0], p[1]))));
     const dots = opts.dots || [[62, 52, 7], [232, 74, 6], [128, 168, 8]];
     const out = new Uint8ClampedArray(w * h * 4);
-    let seed = 7;
+    let seed = opts.seed || 7;
     const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647 - 0.5; };
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const [X, Y] = applyH(Hi, x + 0.5, y + 0.5);
@@ -669,7 +669,7 @@ const Core = (() => {
     return out;
   }
 
-  return { detect, detectChess, poseFromH, solvePose, project, applyH, inv3, homography, synth, v, A4L, A4S };
+  return { detect, detectChess, poseFromH, fitH, growGrid, solvePose, project, applyH, inv3, homography, synth, v, A4L, A4S };
 })();
 
 
@@ -701,6 +701,44 @@ const Core = (() => {
   let src = null, sw = 0, sh = 0;   // current source
   let last = null;                  // {det, pose, pw, ph, ms}
   let prevQuad = null, prevLong = null, prevDots = null;
+  let qf = null, chessTrack = null, lastGood = null, hold = 0;
+  const HOLD_FRAMES = 10;
+  let jumpCount = 0;
+
+  // One-Euro-Filter: ruhig bei langsamer Bewegung, schnell bei schneller
+  class OneEuro {
+    constructor(mc = 0.8, beta = 0.012, dc = 1.0) { this.mc = mc; this.beta = beta; this.dc = dc; this.x = null; this.dx = 0; this.t = 0; }
+    a(c, dt) { const r = 2 * Math.PI * c * dt; return r / (r + 1); }
+    filter(x, t) {
+      if (this.x === null) { this.x = x; this.t = t; return x; }
+      const dt = Math.max(1e-3, t - this.t); this.t = t;
+      this.dx += this.a(this.dc, dt) * ((x - this.x) / dt - this.dx);
+      this.x += this.a(this.mc + this.beta * Math.abs(this.dx), dt) * (x - this.x);
+      return this.x;
+    }
+  }
+  const newFilters = () => [0, 1, 2, 3].map(() => [new OneEuro(), new OneEuro()]);
+
+  // aktuelles Gitter auf das vorige abbilden: 8 Symmetrien x ganzzahliger Versatz, Mehrheitsentscheid
+  function alignLattice(inl, Hprev) {
+    const Hi = Core.inv3(Hprev);
+    if (!Hi) return null;
+    const syms = [[1, 0, 0, 1], [0, -1, 1, 0], [-1, 0, 0, -1], [0, 1, -1, 0], [1, 0, 0, -1], [-1, 0, 0, 1], [0, 1, 1, 0], [0, -1, -1, 0]];
+    const q = inl.map(o => Core.applyH(Hi, o.p.x, o.p.y));
+    let best = null;
+    for (const S of syms) {
+      const votes = new Map();
+      inl.forEach((o, k) => {
+        const di = q[k][0] - (S[0] * o.i + S[1] * o.j), dj = q[k][1] - (S[2] * o.i + S[3] * o.j);
+        const ri = Math.round(di), rj = Math.round(dj);
+        if (Math.abs(di - ri) < 0.3 && Math.abs(dj - rj) < 0.3) { const key = ri + ',' + rj; votes.set(key, (votes.get(key) || 0) + 1); }
+      });
+      for (const [key, n] of votes) if (!best || n > best.n) best = { n, S, o: key.split(',').map(Number) };
+    }
+    if (!best || best.n < Math.max(6, 0.6 * inl.length)) return null;
+    const { S, o } = best;
+    return inl.map(e => [S[0] * e.i + S[1] * e.j + o[0], S[2] * e.i + S[3] * e.j + o[1]]);
+  }
 
   const fovIn = $('fov');
   const fov = () => +fovIn.value;
@@ -809,7 +847,7 @@ const Core = (() => {
     stream = null; live = false;
     $('btnLive').textContent = 'Live-Kamera';
   }
-  function resetTrack() { prevQuad = null; prevLong = null; prevDots = null; }
+  function resetTrack() { prevQuad = null; prevLong = null; prevDots = null; qf = null; chessTrack = null; lastGood = null; hold = 0; }
 
   function loadDemo() {
     const w = 1200, h = 900;
@@ -833,44 +871,82 @@ const Core = (() => {
     if (target === 'chess') {
       det = Core.detectChess(data, pw, ph);
       det.target = 'chess';
+      const s = +$('sq').value || 50;
+      // 1. Tracking: Ecken über das vorige Gitter vorhersagen (robust bei Teilverdeckung)
+      let tracked = null;
+      if (smooth && chessTrack && chessTrack.H && det.corners && det.corners.length >= 8) {
+        const g = Core.growGrid(det.corners, chessTrack.H);
+        if (g && g.inl.length >= 8) tracked = g;
+      }
+      if (tracked) { det.ok = true; det.inl = tracked.inl; det.reason = ''; }
       if (det.ok) {
-        const s = +$('sq').value || 50;
-        const W = det.ni * s, H = det.nj * s;
-        const rect = [[0, 0], [W, 0], [W, H], [0, H]];
-        const Hm0 = Core.homography(rect, rect.map(p => Core.applyH(det.Hlat, p[0] / s, p[1] / s)));
-        let quad = rect.map(p => Core.applyH(Hm0, p[0], p[1]));
-        if (smooth) {
-          if (prevQuad && prevLong === W + 'x' + H) quad = smoothQuad(quad, false); else prevQuad = quad;
-          prevLong = W + 'x' + H;
+        let coords = det.inl.map(o => [o.i, o.j]), span = [det.ni, det.nj], fresh = true;
+        if (tracked) { span = chessTrack.span; fresh = false; }
+        else if (smooth) {
+          // 2. Neu erkannt: an voriges Gitter anschließen, sonst neu starten
+          const al = chessTrack && chessTrack.H && alignLattice(det.inl, chessTrack.H);
+          if (al) { coords = al; span = chessTrack.span; fresh = false; }
+          else chessTrack = { span };
         }
-        const Hm = Core.homography(rect, quad);
-        pose = Hm && Core.poseFromH(Hm, pw, ph, fov(), W, H, det.inl.map(o => [o.i * s, o.j * s, o.p.x, o.p.y]));
-        if (pose) pose.sq = s;
-      } else if (smooth) prevQuad = null;
-      last = { det, pose, pw, ph, ms: performance.now() - t0 };
+        const Hl = Core.fitH(coords, det.inl.map(o => [o.p.x, o.p.y]));
+        let res = 0;
+        if (Hl) det.inl.forEach((o, k) => { const q = Core.applyH(Hl, coords[k][0], coords[k][1]); res += Math.hypot(q[0] - o.p.x, q[1] - o.p.y); });
+        if (Hl && res / det.inl.length > 1.5) { det.ok = false; det.reason = 'Gitter unsicher'; }
+        else if (Hl) {
+          if (smooth) chessTrack.H = Hl;
+          det.fresh = fresh;
+          const W = span[0] * s, H = span[1] * s;
+          const rect = [[0, 0], [W, 0], [W, H], [0, H]];
+          let quad = rect.map(p => Core.applyH(Hl, p[0] / s, p[1] / s));
+          if (smooth) { if (fresh) prevQuad = null; quad = smoothQuad(quad, false); }
+          const Hm = quad && Core.homography(rect, quad);
+          pose = Hm && Core.poseFromH(Hm, pw, ph, fov(), W, H, det.inl.map((o, k) => [coords[k][0] * s, coords[k][1] * s, o.p.x, o.p.y]));
+          if (pose) pose.sq = s;
+        }
+      }
+      finish(det, pose, pw, ph, t0, smooth);
       return;
     }
     det = Core.detect(data, pw, ph);
     if (det.quad && !det.reason.startsWith('Blatt verdeckt') && !det.reason.startsWith('Blattform')) {
-      if (smooth) det.quad = smoothQuad(det.quad);
-      pose = Core.solvePose(det.quad, pw, ph, fov(), prevLong);
-      if (pose) prevLong = pose.long0;
+      const raw = Core.solvePose(det.quad, pw, ph, fov(), prevLong);
+      if (raw && raw.reproj < 3) {
+        const q = smooth ? smoothQuad(det.quad) : det.quad;
+        if (q) { det.quad = q; pose = Core.solvePose(q, pw, ph, fov(), prevLong); }
+        if (pose) prevLong = pose.long0;
+      }
       if (smooth && det.dots) det.dots = smoothDots(det.dots);
-    } else if (smooth) { prevQuad = null; prevDots = null; }
-    last = { det, pose, pw, ph, ms: performance.now() - t0 };
+    }
+    finish(det, pose, pw, ph, t0, smooth);
+  }
+
+  // Aussetzer überbrücken: letzte gute Pose einige Frames halten statt flackern
+  function finish(det, pose, pw, ph, t0, smooth) {
+    const ms = performance.now() - t0;
+    if (pose) { hold = 0; last = { det, pose, pw, ph, ms }; lastGood = last; return; }
+    if (smooth && lastGood && ++hold <= HOLD_FRAMES) { last = Object.assign({}, lastGood, { ms, held: true }); return; }
+    if (smooth && hold > HOLD_FRAMES) { prevQuad = null; prevDots = null; qf = null; }
+    last = { det, pose, pw, ph, ms };
   }
 
   function smoothQuad(q, allowPerm = true) {
-    if (!prevQuad) { prevQuad = q; return q; }
+    const t = performance.now() / 1000;
+    if (!prevQuad || !qf) { qf = newFilters(); prevQuad = q.map((p, i) => [qf[i][0].filter(p[0], t), qf[i][1].filter(p[1], t)]); return prevQuad; }
     let best = null, bestD = Infinity;
     for (const dir of allowPerm ? [1, -1] : [1]) for (let s = 0; s < (allowPerm ? 4 : 1); s++) {
       const perm = [0, 1, 2, 3].map(i => q[((s + dir * i) % 4 + 4) % 4]);
       const d = perm.reduce((a, p, i) => a + Math.hypot(p[0] - prevQuad[i][0], p[1] - prevQuad[i][1]), 0);
       if (d < bestD) { bestD = d; best = perm; }
     }
-    if (bestD / 4 > 20) { prevQuad = q; prevLong = null; return q; }
-    const a = bestD / 4 < 2 ? 0.35 : 0.65;
-    prevQuad = best.map((p, i) => [prevQuad[i][0] + (p[0] - prevQuad[i][0]) * a, prevQuad[i][1] + (p[1] - prevQuad[i][1]) * a]);
+    if (bestD / 4 > 40) {
+      // großer Sprung: erst nach 3 bestätigenden Frames übernehmen, sonst als Aussetzer werten
+      if (++jumpCount < 3) return null;
+      jumpCount = 0; qf = newFilters(); prevLong = null;
+      prevQuad = q.map((p, i) => [qf[i][0].filter(p[0], t), qf[i][1].filter(p[1], t)]);
+      return prevQuad;
+    }
+    jumpCount = 0;
+    prevQuad = best.map((p, i) => [qf[i][0].filter(p[0], t), qf[i][1].filter(p[1], t)]);
     return prevQuad;
   }
   function smoothDots(ds) {
@@ -889,7 +965,7 @@ const Core = (() => {
     if (!live) return;
     if (video.readyState >= 2 && video.videoWidth) {
       src = video; sw = video.videoWidth; sh = video.videoHeight;
-      process(420, true);
+      process(target === 'chess' ? 480 : 420, true);
       render();
       if (tool === 'ki' && ++kiFrame % 4 === 0) runKi();
     }
@@ -957,7 +1033,7 @@ const Core = (() => {
       if (tool === 'overlay') drawMode(F, P, lw, dpr);
       if (F.dots) drawDots(F, P, lw, dpr);
       if (tool === 'messen') drawTaps(P, lw, dpr);
-      if (det.target === 'chess') { status = 'ok'; statusText = `Schachbrett, ${det.inl.length} Ecken (${det.ni + 1}×${det.nj + 1})`; }
+      if (det.target === 'chess') { status = last.held ? 'warn' : 'ok'; statusText = last.held ? 'Schachbrett (gehalten)' : `Schachbrett, ${det.inl.length} Ecken`; }
       else { status = F.dots ? 'ok' : 'warn'; statusText = F.dots ? 'Blatt + 3 Punkte' : (det.reason || 'Nur Blatt'); }
       updateReadout(F, pose);
     } else updateReadout(null, null);
@@ -1165,6 +1241,7 @@ const Core = (() => {
   }
 
   window.addEventListener('resize', () => { lastSize = ''; if (!live) render(); });
+  window.__ar = { get last() { return last; } };
   loadDemo();
 })();
 </script>
