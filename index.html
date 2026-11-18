@@ -138,7 +138,7 @@ input[type=checkbox] { accent-color: var(--accent); }
   <section class="howto">
     <h2>So geht es</h2>
     <ol>
-      <li>Ziel wählen. A4: Blatt auf dunklen, matten Untergrund, alle vier Ecken sichtbar. Schachbrett: leeres Brett, Feldgröße mit Lineal messen und eintragen. Ein Teilausschnitt reicht.</li>
+      <li>Ziel wählen. A4: Blatt auf dunklen, matten Untergrund, alle vier Ecken sichtbar. Schachbrett: Figuren runter, gutes Licht, eher von schräg oben als flach. Feldgröße mit Lineal messen und eintragen. Ein Teilausschnitt ab 4×4 Ecken reicht.</li>
       <li>Optional: drei gefüllte Punkte malen, Ø 8–20 mm, dicker schwarzer Stift. Nicht als gleichseitiges Dreieck.</li>
       <li>Foto aufnehmen oder Live-Kamera starten. Sichtfeld an Kamera anpassen (iPhone-Hauptkamera ca. 63–66°).</li>
       <li>Labels: A liegt gegenüber der längsten Seite, C gegenüber der kürzesten.</li>
@@ -496,7 +496,7 @@ const Core = (() => {
         const ux = pa[0] - p0[0], uy = pa[1] - p0[1], wx = pc[0] - p0[0], wy = pc[1] - p0[1];
         const la = nb[a][1], lc = nb[c][1];
         const cos = (ux * wx + uy * wy) / (la * lc);
-        if (Math.abs(cos) > 0.5 || la / lc > 2 || lc / la > 2) continue;
+        if (Math.abs(cos) > 0.8 || la / lc > 4.5 || lc / la > 4.5) continue;
         const d = [pa[0] + pc[0] - p0[0], pa[1] + pc[1] - p0[1]];
         let dk = -1, dd = 0.3 * (la + lc) / 2;
         P.forEach((p, k) => { const e = Math.hypot(p[0] - d[0], p[1] - d[1]); if (e < dd) { dd = e; dk = k; } });
@@ -507,7 +507,7 @@ const Core = (() => {
         if (!g) continue;
         const is = g.inl.map(o => o.i), js = g.inl.map(o => o.j);
         const spanI = Math.max(...is) - Math.min(...is), spanJ = Math.max(...js) - Math.min(...js);
-        if (spanI < 2 || spanJ < 2) continue;
+        if (spanI < 3 || spanJ < 3) continue;
         if (g.inl.length / ((spanI + 1) * (spanJ + 1)) < 0.6) continue;
         if (!best || g.inl.length > best.inl.length) best = g;
         if (best.inl.length >= 0.85 * pts.length) break;
@@ -537,7 +537,7 @@ const Core = (() => {
     const corners = chessCorners(g, w, h);
     if (corners.length < 9) return { ok: false, corners, reason: `Nur ${corners.length} Ecken. Brett näher oder heller.` };
     const fit = fitGrid(corners);
-    if (!fit || fit.inl.length < 9) return { ok: false, corners, reason: 'Kein Gitter gefunden. Brett leer räumen.' };
+    if (!fit || fit.inl.length < 12) return { ok: false, corners, reason: 'Kein Gitter gefunden. Brett leer räumen.' };
     const c = canonical(fit);
     if (!c.H) return { ok: false, corners, reason: 'Gitter instabil.' };
     return { ok: true, corners, inl: c.inl, Hlat: c.H, ni: c.ni, nj: c.nj, reason: '' };
@@ -646,7 +646,15 @@ const Core = (() => {
       if (chess && X >= 0 && X <= PW && Y >= 0 && Y <= PH) {
         let l;
         if (X < bd || Y < bd || X > PW - bd || Y > PH - bd) l = 95 + rnd() * 6;
-        else l = ((Math.floor((X - bd) / sq) + Math.floor((Y - bd) / sq)) & 1) ? 48 + rnd() * 6 : 214 - X * 0.05 + rnd() * 6;
+        else {
+          const ci = Math.floor((X - bd) / sq), cj = Math.floor((Y - bd) / sq);
+          const lo = opts.dark ?? 48, hi = opts.light ?? 214;
+          l = ((ci + cj) & 1) ? lo + rnd() * 6 : hi - X * 0.05 + rnd() * 6;
+          if (opts.pieces && (cj <= 1 || cj >= 6)) {
+            const px = bd + (ci + 0.5) * sq, py = bd + (cj + 0.5) * sq;
+            if (Math.hypot(X - px, Y - py) < sq * 0.33) l = cj <= 1 ? 60 : 200;
+          }
+        }
         r = l + 6; gg = l + 2; b = l - 4;
       } else if (!chess && X >= 0 && X <= A4L && Y >= 0 && Y <= A4S) {
         let l = 226 - X * 0.07 - Y * 0.04 + rnd() * 6;
@@ -876,7 +884,10 @@ const Core = (() => {
       let tracked = null;
       if (smooth && chessTrack && chessTrack.H && det.corners && det.corners.length >= 8) {
         const g = Core.growGrid(det.corners, chessTrack.H);
-        if (g && g.inl.length >= 8) tracked = g;
+        if (g && g.inl.length >= 10) {
+          const is = g.inl.map(o => o.i), js = g.inl.map(o => o.j);
+          if (Math.max(...is) - Math.min(...is) >= 2 && Math.max(...js) - Math.min(...js) >= 2) tracked = g;
+        }
       }
       if (tracked) { det.ok = true; det.inl = tracked.inl; det.reason = ''; }
       if (det.ok) {
@@ -965,7 +976,7 @@ const Core = (() => {
     if (!live) return;
     if (video.readyState >= 2 && video.videoWidth) {
       src = video; sw = video.videoWidth; sh = video.videoHeight;
-      process(target === 'chess' ? 480 : 420, true);
+      process(target === 'chess' ? 640 : 420, true);
       render();
       if (tool === 'ki' && ++kiFrame % 4 === 0) runKi();
     }
