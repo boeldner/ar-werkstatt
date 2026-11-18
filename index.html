@@ -150,10 +150,10 @@ input[type=checkbox] { accent-color: var(--accent); }
   </section>
 </main>
 
-<video id="video" playsinline muted style="display:none"></video>
+<video id="video" playsinline muted autoplay style="position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none"></video>
 <canvas id="proc" style="display:none"></canvas>
 
-<script>
+<script id="coreSrc">
 const Core = (() => {
   const A4L = 297, A4S = 210;
 
@@ -868,16 +868,44 @@ const Core = (() => {
   }
 
   // ---------- processing ----------
-  function process(maxSide, smooth) {
-    const t0 = performance.now();
+  function grab(maxSide) {
     const k = Math.min(1, maxSide / Math.max(sw, sh));
     const pw = Math.round(sw * k), ph = Math.round(sh * k);
     if (proc.width !== pw || proc.height !== ph) { proc.width = pw; proc.height = ph; }
     pctx.drawImage(src, 0, 0, pw, ph);
-    const data = pctx.getImageData(0, 0, pw, ph).data;
-    let det, pose = null;
+    return { data: pctx.getImageData(0, 0, pw, ph).data, pw, ph };
+  }
+  function detectNow(data, pw, ph) { return target === 'chess' ? Core.detectChess(data, pw, ph) : Core.detect(data, pw, ph); }
+
+  function process(maxSide, smooth) {
+    const t0 = performance.now();
+    const g = grab(maxSide);
+    analyze(detectNow(g.data, g.pw, g.ph), g.pw, g.ph, t0, smooth);
+  }
+
+  // Erkennung im Web Worker, damit das Kamerabild flüssig mit 60 fps läuft
+  let worker = null, busy = false;
+  try {
+    const src0 = document.getElementById('coreSrc').textContent;
+    const wsrc = src0 + `\nonmessage = e => { const m = e.data; const d = new Uint8ClampedArray(m.buf);
+      const det = m.target === 'chess' ? Core.detectChess(d, m.w, m.h) : Core.detect(d, m.w, m.h);
+      postMessage({ det, w: m.w, h: m.h, target: m.target, t0: m.t0 }); };`;
+    worker = new Worker(URL.createObjectURL(new Blob([wsrc], { type: 'text/javascript' })));
+    worker.onmessage = e => {
+      busy = false;
+      const m = e.data;
+      if (!live || m.target !== target) return;
+      analyze(m.det, m.w, m.h, m.t0, true);
+      stats.push(performance.now());
+      if (tool === 'ki' && ++kiFrame % 4 === 0) runKi();
+    };
+    worker.onerror = () => { worker = null; busy = false; };
+  } catch (err) { worker = null; }
+  const stats = [];
+
+  function analyze(det, pw, ph, t0, smooth) {
+    let pose = null;
     if (target === 'chess') {
-      det = Core.detectChess(data, pw, ph);
       det.target = 'chess';
       const s = +$('sq').value || 50;
       // 1. Tracking: Ecken über das vorige Gitter vorhersagen (robust bei Teilverdeckung)
@@ -918,7 +946,6 @@ const Core = (() => {
       finish(det, pose, pw, ph, t0, smooth);
       return;
     }
-    det = Core.detect(data, pw, ph);
     if (det.quad && !det.reason.startsWith('Blatt verdeckt') && !det.reason.startsWith('Blattform')) {
       const raw = Core.solvePose(det.quad, pw, ph, fov(), prevLong);
       if (raw && raw.reproj < 3) {
@@ -932,11 +959,13 @@ const Core = (() => {
   }
 
   // Aussetzer überbrücken: letzte gute Pose einige Frames halten statt flackern
+  const HOLD_MS = 600;
+  let lastGoodT = 0;
   function finish(det, pose, pw, ph, t0, smooth) {
-    const ms = performance.now() - t0;
-    if (pose) { hold = 0; last = { det, pose, pw, ph, ms }; lastGood = last; return; }
-    if (smooth && lastGood && ++hold <= HOLD_FRAMES) { last = Object.assign({}, lastGood, { ms, held: true }); return; }
-    if (smooth && hold > HOLD_FRAMES) { prevQuad = null; prevDots = null; qf = null; }
+    const now = performance.now(), ms = now - t0;
+    if (pose) { last = { det, pose, pw, ph, ms }; lastGood = last; lastGoodT = now; return; }
+    if (smooth && lastGood && now - lastGoodT < HOLD_MS) { last = Object.assign({}, lastGood, { ms, held: true }); return; }
+    if (smooth) { prevQuad = null; prevDots = null; qf = null; }
     last = { det, pose, pw, ph, ms };
   }
 
@@ -976,9 +1005,18 @@ const Core = (() => {
     if (!live) return;
     if (video.readyState >= 2 && video.videoWidth) {
       src = video; sw = video.videoWidth; sh = video.videoHeight;
-      process(target === 'chess' ? 640 : 420, true);
+      const maxSide = target === 'chess' ? 640 : 420;
+      if (worker) {
+        if (!busy) {
+          const t0 = performance.now(), g = grab(maxSide);
+          busy = true;
+          worker.postMessage({ buf: g.data.buffer, w: g.pw, h: g.ph, target, t0 }, [g.data.buffer]);
+        }
+      } else {
+        process(maxSide, true); stats.push(performance.now());
+        if (tool === 'ki' && ++kiFrame % 4 === 0) runKi();
+      }
       render();
-      if (tool === 'ki' && ++kiFrame % 4 === 0) runKi();
     }
     requestAnimationFrame(loop);
   }
@@ -1052,7 +1090,11 @@ const Core = (() => {
     if (tool !== 'messen') { $('rMeas').textContent = '–'; }
     const b = $('badge'); b.dataset.s = status; b.textContent = statusText;
     $('rStatus').textContent = statusText;
-    $('rMs').textContent = last.ms.toFixed(0) + ' ms @ ' + last.pw + ' px';
+    if (live) {
+      const now = performance.now();
+      while (stats.length && now - stats[0] > 2000) stats.shift();
+      $('rMs').textContent = `${(stats.length / 2).toFixed(0)} Erk./s, ${last.ms.toFixed(0)} ms @ ${last.pw} px`;
+    } else $('rMs').textContent = last.ms.toFixed(0) + ' ms @ ' + last.pw + ' px';
   }
 
   function poly(pts, close, fill) {
